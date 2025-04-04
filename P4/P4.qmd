@@ -33,6 +33,8 @@ library(leaflet)
 here("code",
      "grvty_balancing.R") |>
   source()
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
 ```
 
 ## Select a study area
@@ -44,9 +46,6 @@ all_cbsas <- core_based_statistical_areas(progress_bar = FALSE,
   select(NAMELSAD) |>
   mutate(type = ifelse(!is.na(str_match(NAMELSAD, "Metro")), "Metro", "Micro")) |>
   mutate(type = as.character(type))
-
-table(all_cbsas$type) |>
-  kable()
 ```
 
 -   Napa County (FIPS = 06055)
@@ -95,14 +94,6 @@ pa_data <- read_csv(url) |>
   
 ```
 
-Let's take a look at this dataset.
-
-```{r view-jobs}
-
-head(pa_data) |>
-  kable()
-```
-
 ## Aggregate data to zone totals
 
 ```{r aggreg-jobs, message=FALSE}
@@ -124,16 +115,9 @@ trip_gen <- full_join(total_prod,
                   income1_a = 0,
                   income3_p = 0,
                   income3_a = 0))
-
-head(trip_gen) |>
-  kable()
 ```
 
 ## Load spatial data
-
-The idea behind the gravity model is that trips are more attracted to places with more attractions, and less attracted to places that are further away (in terms of travel time). So we need to associate all these jobs with their locations.
-
-First, let's download the census block boundaries within these four counties.
 
 ```{r load-blocks, message=FALSE}
 
@@ -242,7 +226,6 @@ street_pts <- here("P4",
                      "street-pts.shp") |>
   st_read()
 
-
 ```
 
 ```{r plot-streets, eval=FALSE}
@@ -258,11 +241,11 @@ ggplot() +
           color = "pink3",
           fill = "pink") +
   geom_sf(data = street_lines,
-          color =  "lightgreen") +
+          color =  "darkorchid4") +
   theme_void()
 ```
 
-## Skim the network
+## Remove missing ids
 
 ```{r get-centroids, message=FALSE, warning=FALSE}
 
@@ -271,12 +254,37 @@ trip_gen_loc_ids <- trip_gen_locs |>
   st_nearest_feature(street_pts)
 ```
 
-```{r snap-centroids}
-
+```{r}
 trip_gen_pts <- street_pts[trip_gen_loc_ids,] |>
   mutate(id = trip_gen_locs$geocode) |>
   select(id)
 ```
+
+```{r}
+# Remove unwanted census blocks from trip_gen_locs first
+remove_ids <- c("060552007032003", "060552014031015", "060552018001042")
+trip_gen_locs_filtered <- trip_gen_locs |> 
+  filter(!geocode %in% remove_ids)
+
+# Convert the filtered trip_gen_locs to EPSG:4326 (WGS 84) CRS if needed
+trip_gen_locs_filtered <- trip_gen_locs_filtered |> st_transform(4326)
+
+# Convert street_pts to EPSG:4326 (WGS 84) CRS
+street_pts <- street_pts |> st_transform(4326)
+
+# Apply st_point_on_surface to trip_gen_locs_filtered in the correct CRS
+trip_gen_loc_ids <- trip_gen_locs_filtered |> 
+  st_point_on_surface() |> 
+  st_nearest_feature(street_pts)
+
+# Create trip_gen_pts using the filtered trip_gen_locs
+trip_gen_pts_2 <- street_pts[trip_gen_loc_ids,] |> 
+  mutate(id = trip_gen_locs_filtered$geocode) |> 
+  select(id)
+
+```
+
+## Skim the network
 
 ```{r, eval=FALSE}
 
@@ -288,7 +296,7 @@ skim <- travel_time_matrix(napa_core,
                            origins = trip_gen_pts,
                            destinations = trip_gen_pts,
                            mode = "CAR",
-                           max_trip_duration = 600)
+                           max_trip_duration = 1440)
 
 stop_r5()
 
@@ -297,53 +305,118 @@ stop_r5()
 ```{r, eval=FALSE}
 write_csv(skim, file = here("P4",
                             "data",
-                            "napa-skim_3.csv"))
+                            "napa-skim.csv"))
 ```
 
 ```{r read-skim}
 skim <- read_csv(here("P4",
                       "data",
-                      "napa-skim_3.csv"),
+                      "napa-skim.csv"),
                  col_types = "ccn")
-```
-
-```{r view-skim}
-
-head(skim) |>   
-  kable()
 ```
 
 ```{r count-skim}
 
-nrow(skim)
+nrow(trip_gen_locs)^2 -  nrow(skim)
+```
+
+### Check to see which zones are missing from the skim
+
+```{r}
+
+skim_interzonal <- skim |>
+  filter(from_id != to_id)
+
+unique_skim_zones <- unique(c(skim_interzonal$from_id, skim_interzonal$to_id))
+
+missing_from_skim <- trip_gen_locs |>
+  filter(geocode %!in% unique_skim_zones)
+
+missing_pts <- trip_gen_pts  |>
+  filter(id %!in% unique_skim_zones)
+
+```
+
+Where are those missing zones??
+
+```{r}
+ggplot() +
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(data = missing_from_skim,
+          color = "pink3",
+          fill = "pink") +
+  theme_void()
+```
+
+```{r}
+base_map <- get_tiles(missing_from_skim,
+                      provider = "CartoDB.Positron",
+                      zoom = 8,
+                      crop = TRUE)
+
+missing_bbox <- st_bbox(missing_from_skim)
+
+missing_from_skim <- ggplot() + 
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(data = missing_from_skim,
+          color = "pink3",
+          fill = "pink") +
+  geom_sf(data = street_lines,
+          color =  "springgreen4",
+          alpha = 0.05,
+          linewidth = 0.25) +
+  theme_void()
+
+ggsave("missing_from_skim.png", plot = missing_from_skim, width = 8, height = 6, dpi = 300)
+
+```
+
+What is in them?
+
+```{r}
+
+missing_zones_trip_gen <- trip_gen |>
+  filter(geocode %!in% unique_skim_zones)
+```
+
+## remove missing zones from skim
+
+```{r}
+pa_data_2 <- pa_data |> 
+  filter(!(w_geocode %in% missing_zones_trip_gen$geocode | 
+           h_geocode %in% missing_zones_trip_gen$geocode))
+```
+
+### re aggregate data
+
+```{r}
+total_prod_2 <- pa_data_2 |>
+  group_by(h_geocode) |>
+  summarise(income1_p = sum(SE01),
+            income3_p = sum(SE03)) |>
+  rename(geocode = h_geocode)
+
+total_attr_2 <- pa_data_2 |>
+  group_by(w_geocode) |>
+  summarize(income1_a = sum(SE01),
+            income3_a = sum(SE03))|>
+  rename(geocode = w_geocode)
+
+trip_gen_2 <- full_join(total_prod_2,
+                      total_attr_2) |>
+  replace_na(list(income1_p = 0, 
+                  income1_a = 0,
+                  income3_p = 0,
+                  income3_a = 0))
 ```
 
 ## Apply a gravity model
 
-```{r draw-friction}
-friction <- tibble(`Travel time (min)` = seq(0, 30, by=1)) |>
-  mutate(`β = -0.001` = exp(0.001 * `Travel time (min)`),
-         `β = 0.050` = exp(-0.050 * `Travel time (min)`),
-         `β = 0.200` = exp(-0.200 * `Travel time (min)`),
-         `β = 0.500` = exp(-0.500 * `Travel time (min)`),
-         `β = 1.000` = exp(-1.000 * `Travel time (min)`)) |>
-  pivot_longer(cols = -`Travel time (min)`,
-               names_to = "betas") |>
-  rename(`Destination attractiveness` = value)
-
-ggplot(friction) +
-  geom_line(aes(x = `Travel time (min)`,
-                y = `Destination attractiveness`,
-                linetype = betas)) +
-  scale_x_continuous(breaks = seq(0, 30, by=5)) +
-  scale_y_continuous(breaks = seq(0, 1.1, by=0.1)) +
-  theme_minimal()
-```
-
 ### Select a decay function parameter
 
 ```{r calc-avg-tt, message=FALSE}
-flow_tt <- pa_data |>
+
+flow_tt_2 <- pa_data_2 |>
   rename(from_id = h_geocode,
          to_id = w_geocode,
          flow_income1 = SE01,
@@ -352,14 +425,15 @@ flow_tt <- pa_data |>
   replace_na(list(flow_income1 = 0,
                   flow_income3 = 0))
 
+flow_tt_2 <- flow_tt_2 %>%
+  filter(!(from_id == "060552007032003" | to_id == "060552007032003"))
+
 avg_tts <- tibble(`Worker sector` = c("income1", "income3"),
                   `Average travel time (observed)` = c(
-                    sum(flow_tt$flow_income1 * flow_tt$travel_time_p50) / 
-                      sum(flow_tt$flow_income1),
-                    sum(flow_tt$flow_income3 * flow_tt$travel_time_p50) / 
-                      sum(flow_tt$flow_income3)))
-                  
-kable(avg_tts, digits = 1)
+                    sum(flow_tt_2$flow_income1 * flow_tt_2$travel_time_p50) / 
+                      sum(flow_tt_2$flow_income1),
+                    sum(flow_tt_2$flow_income3 * flow_tt_2$travel_time_p50) / 
+                      sum(flow_tt_2$flow_income3)))
 ```
 
 ```{r calc-betas}
@@ -399,11 +473,31 @@ ggsave("friction_plot.png", plot = friction_plot, width = 8, height = 6, dpi = 3
 
 ```
 
+```{r}
+friction <- tibble(`Travel time (min)` = seq(0, 30, by=1)) |>
+  mutate(income1 = exp(-1 * betas["income1"] * `Travel time (min)`),
+         income3 = exp(-1 * betas["income3"] * `Travel time (min)`)) |>
+  pivot_longer(cols = -`Travel time (min)`,
+               names_to = "Industry") |>
+  rename(`Destination attractiveness` = value)
+
+ggplot(friction) +
+  geom_line(aes(x = `Travel time (min)`,
+                y = `Destination attractiveness`,
+                linetype = Industry)) +
+  scale_x_continuous(breaks = seq(0, 30, by=5)) +
+  scale_y_continuous(breaks = seq(0, 1.1, by=0.1)) +
+  scale_linetype_manual(values = c("solid", "dashed"),
+                        labels = c("Income Group 1 (SE01)", "Income Group 3 (SE03)")) +
+  theme_minimal() +
+  labs(linetype = "Income Group")
+```
+
 ### Calculate friction factors
 
 ```{r calc-friction}
 
-flow_tt <- flow_tt |>
+flow_tt_2 <- flow_tt_2 |>
   mutate(friction_income1 = exp(-1 * betas["income1"] * travel_time_p50),
          friction_income3 = exp(-1 * betas["income3"] * travel_time_p50))
 ```
@@ -412,8 +506,8 @@ flow_tt <- flow_tt |>
 
 ```{r initial-matrix, eval=FALSE}
 
-flow_income1_est <- grvty_balancing(od_zones = trip_gen,
-                                  friction = flow_tt,
+flow_income1_est <- grvty_balancing(od_zones = trip_gen_2,
+                                  friction = flow_tt_2,
                                   zone_id = "geocode",
                                   zone_o = "income1_p",
                                   zone_d = "income1_a",
@@ -423,8 +517,8 @@ flow_income1_est <- grvty_balancing(od_zones = trip_gen,
                                   tolerance = 0.001,
                                   max_iter = 100)
 
-flow_income3_est <- grvty_balancing(od_zones = trip_gen,
-                                  friction = flow_tt,
+flow_income3_est <- grvty_balancing(od_zones = trip_gen_2,
+                                  friction = flow_tt_2,
                                   zone_id = "geocode",
                                   zone_o = "income3_p",
                                   zone_d = "income3_a",
@@ -441,12 +535,12 @@ flow_income3_est <- grvty_balancing(od_zones = trip_gen,
 write_csv(flow_income1_est$flows,
           file = here("P4",
                       "data",
-                      "init-income1-flow1.csv"))
+                      "init-income1-flow.csv"))
 
 write_csv(flow_income3_est$flows,
           file = here("P4",
                       "data",
-                      "init-income3-flow1.csv"))
+                      "init-income3-flow.csv"))
 ```
 
 ## Evaluate model fit
@@ -454,38 +548,33 @@ write_csv(flow_income3_est$flows,
 ### Average travel time
 
 ```{r calc-est-tt-init, message=FALSE}
-# Load the income flow data and rename columns before joining
-flow_income1 <- here("P4", "data", "init-income1-flow1.csv") |>
+flow_income1 <- here("P4",
+                   "data",
+                   "init-income1-flow.csv") |>
   read_csv(col_types = "ccn") |>
   rename(from_id = o_id,
          to_id = d_id,
          income1_flow_est = flow)
 
-flow_income3 <- here("P4", "data", "init-income3-flow1.csv") |>
+flow_income3 <- here("P4",
+                   "data",
+                   "init-income3-flow.csv") |>
   read_csv(col_types = "ccn") |>
   rename(from_id = o_id,
          to_id = d_id,
          income3_flow_est = flow)
 
-# Ensure that flow_tt has columns from both flow_income1 and flow_income3
-flow_tt <- flow_tt |>
-  left_join(flow_income1, by = c("from_id", "to_id")) |>
-  left_join(flow_income3, by = c("from_id", "to_id"))
+flow_tt_2 <- flow_tt_2 |>
+  left_join(flow_income1) |>
+  left_join(flow_income3)
 
-# Drop rows with missing flow estimates to avoid NA issues in the calculation
-flow_tt <- flow_tt |>
-  drop_na(income1_flow_est, income3_flow_est, travel_time_p50)
-
-# Calculate average travel time, ensuring that no NAs are used in the calculation
 avg_tts <- avg_tts |>
   mutate(`Average travel time (estimated)` = c(
-    sum(flow_tt$income1_flow_est * flow_tt$travel_time_p50, na.rm = TRUE) / 
-      sum(flow_tt$income1_flow_est, na.rm = TRUE),
-    sum(flow_tt$income3_flow_est * flow_tt$travel_time_p50, na.rm = TRUE) / 
-      sum(flow_tt$income3_flow_est, na.rm = TRUE)
-  ))
+    sum(flow_tt_2$income1_flow_est * flow_tt_2$travel_time_p50) / 
+      sum(flow_tt_2$income1_flow_est),
+    sum(flow_tt_2$income3_flow_est * flow_tt_2$travel_time_p50) / 
+      sum(flow_tt_2$income3_flow_est)))
 
-# Print the table to check the results
 avg_tts |>
   kable(digits = 1)
 ```
@@ -495,8 +584,8 @@ avg_tts |>
 ```{r calc-rmse-init}
 
 avg_tts <- avg_tts |>
-  mutate(rmse = c((mean((flow_tt$flow_income1 - flow_tt$income1_flow_est)^2))^0.5,
-                  (mean((flow_tt$flow_income3 - flow_tt$income3_flow_est)^2))^0.5))
+  mutate(rmse = c((mean((flow_tt_2$flow_income1 - flow_tt_2$income1_flow_est)^2))^0.5,
+                  (mean((flow_tt_2$flow_income3 - flow_tt_2$income3_flow_est)^2))^0.5))
 
 kable(avg_tts, digits = 2)
 ```
@@ -548,30 +637,9 @@ plot_flows <- function(flow_df,
 
 income1 sector comparison:
 
-```{r}
-# Create the plot and store it in a variable
-income1_plot <- plot_flows(flow_tt, 
-                            obs_col_name = "flow_income1", 
-                            est_col_name = "income1_flow_est")
-
-# Modify the x-axis maximum (e.g., set x max to 100)
-income1_plot <- income1_plot + 
-  scale_y_continuous(limits = c(NA, 16))  # NA for the lower bound (auto), 100 for the upper bound
-
-# Display the modified plot
-print(income1_plot)
-
-```
-
-```{r}
-plot_flows(flow_tt,                    
-           obs_col_name = "flow_income1", 
-           est_col_name = "income1_flow_est")
-```
-
 ```{r plot-income1-init, message=FALSE}
 # Store the plot in a variable
-income1_plot <- plot_flows(flow_tt, 
+income1_plot <- plot_flows(flow_tt_2, 
                             obs_col_name = "flow_income1", 
                             est_col_name = "income1_flow_est")
 
@@ -582,15 +650,9 @@ ggsave("income1_flow_plot.png", plot = income1_plot, width = 8, height = 6, dpi 
 
 income3 sector comparison:
 
-```{r}
-plot_flows(flow_tt, 
-           obs_col_name = "flow_income3", 
-           est_col_name = "income3_flow_est")
-```
-
 ```{r plot-income3-init, message=FALSE}
 # Store the plot in a variable
-income3_plot <- plot_flows(flow_tt, 
+income3_plot <- plot_flows(flow_tt_2, 
                             obs_col_name = "flow_income3", 
                             est_col_name = "income3_flow_est")
 
@@ -602,12 +664,12 @@ ggsave("income3_flow_plot.png", plot = income3_plot, width = 8, height = 6, dpi 
 ## Calibrate the gravity model
 
 ```{r calibrate, eval=FALSE}
-flow_tt <- flow_tt |>
+flow_tt_2 <- flow_tt_2 |>
   select(-income1_flow_est,
          -income3_flow_est)
 
 ## Calibrate income1 beta
-calibrated_flows_income1 <- grvty_calibrate(obs_flow_tt = flow_tt,
+calibrated_flows_income1 <- grvty_calibrate(obs_flow_tt = flow_tt_2,
                                           o_id_col = "from_id",
                                           d_id_col = "to_id",
                                           obs_flow_col = "flow_income1",
@@ -625,11 +687,11 @@ income1_flow_est <- calibrated_flows_income1$flows |>
          income1_flow_est = flow_est) |>
   select(from_id, to_id, income1_flow_est)
 
-flow_tt <- flow_tt |>
+flow_tt_2 <- flow_tt_2 |>
   left_join(income1_flow_est)
 
 ## Calibrate income3 beta
-calibrated_flows_income3 <- grvty_calibrate(obs_flow_tt = flow_tt,
+calibrated_flows_income3 <- grvty_calibrate(obs_flow_tt = flow_tt_2,
                                           o_id_col = "from_id",
                                           d_id_col = "to_id",
                                           obs_flow_col = "flow_income3",
@@ -647,7 +709,7 @@ income3_flow_est <- calibrated_flows_income3$flows |>
          income3_flow_est = flow_est) |>
   select(from_id, to_id, income3_flow_est)
 
-flow_tt <- flow_tt |>
+flow_tt_2 <- flow_tt_2 |>
   left_join(income3_flow_est)
 
 
@@ -656,7 +718,7 @@ betas_table <- tibble(Industry = c("income1",
                       beta_initial = betas,
                       beta_calibrated = c(beta_income1,
                                           beta_income3))
-write_csv(flow_tt,
+write_csv(flow_tt_2,
           here("P4",
                "data",
                "calib-flows.csv"))
@@ -674,7 +736,7 @@ write_csv(betas_table,
 
 ```{r new-avg-tt, message=FALSE}
 
-flow_tt <- here("P4",
+flow_tt_3 <- here("P4",
                 "data",
                 "calib-flows.csv") |>
   read_csv()
@@ -682,10 +744,10 @@ flow_tt <- here("P4",
 avg_tts <- avg_tts |>
   select(-rmse) |>
   mutate(`Average travel time (estimated)` = c(
-    sum(flow_tt$income1_flow_est * flow_tt$travel_time_p50) / 
-      sum(flow_tt$income1_flow_est),
-    sum(flow_tt$income3_flow_est * flow_tt$travel_time_p50) / 
-      sum(flow_tt$income3_flow_est)))
+    sum(flow_tt_3$income1_flow_est * flow_tt_3$travel_time_p50) / 
+      sum(flow_tt_3$income1_flow_est),
+    sum(flow_tt_3$income3_flow_est * flow_tt_3$travel_time_p50) / 
+      sum(flow_tt_3$income3_flow_est)))
 
 avg_tts |>
   kable(digits = 1)
@@ -695,9 +757,9 @@ avg_tts |>
 
 ```{r new-rmse}
 
-avg_tts <- avg_tts |>
-  mutate(rmse = c((mean((flow_tt$flow_income1 - flow_tt$income1_flow_est)^2))^0.5,
-                  (mean((flow_tt$flow_income3 - flow_tt$income3_flow_est)^2))^0.5))
+avg_tts_2 <- avg_tts |>
+  mutate(rmse = c((mean((flow_tt_3$flow_income1 - flow_tt_3$income1_flow_est)^2))^0.5,
+                  (mean((flow_tt_3$flow_income3 - flow_tt_3$income3_flow_est)^2))^0.5))
 
 kable(avg_tts, digits = 2)
 ```
@@ -707,7 +769,7 @@ kable(avg_tts, digits = 2)
 estimated and observed flows for income1-producing workers.
 
 ```{r new-plot-income1, message=FALSE}
-plot_flows(flow_tt,
+plot_flows(flow_tt_3,
            obs_col_name = "flow_income1",
            est_col_name = "income1_flow_est")
 ```
@@ -715,12 +777,22 @@ plot_flows(flow_tt,
 for income3 workers:
 
 ```{r new-plot-income3, message=FALSE}
-plot_flows(flow_tt,
+plot_flows(flow_tt_2,
            obs_col_name = "flow_income3",
            est_col_name = "income3_flow_est")
 ```
 
 ## Interpret calibrated parameters
+
+```{r}
+# Print the beta values from the betas_table
+print(betas_table)
+
+# Alternatively, if you want to view the beta values specifically, you can access them like this:
+beta_values <- betas_table$beta_calibrated
+print(beta_values)
+
+```
 
 ```{r plot-final-betas, message=FALSE}
 
@@ -747,6 +819,6 @@ ggplot(friction) +
                 linetype = Sector)) +
   scale_x_continuous(breaks = seq(0, 60, by=5)) +
   scale_y_continuous(breaks = seq(0, 2, by=0.1),
-                     limits = c(0, 1.5)) +
+                     limits = c(0, 1)) +
   theme_minimal()
 ```
