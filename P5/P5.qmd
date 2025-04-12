@@ -45,32 +45,26 @@ people <- here("data",
   read_csv(show_col_types = FALSE)
 ```
 
-## Filter sample
-
-I will be filtering my data by trip purpose, by population, and by trip distance. For your own assignment, you do not need to filter by both trip purpose and population. You might choose one or the other.
-
-### Filter for selected trip purpose
-
-The trip purpose is defined by the WHYTO and WHYFROM variables. For this example, I am going to focus on whether people walk to or from visits with friends and relatives (WHYTO or WHYFROM is 17).
+Add vehicle data
 
 ```{r}
-
-visit_trips <- trips |>
-  filter(WHYTO == "17" |
-           WHYFROM == "17")
+vehicles <- here("data",
+               "NHTS",
+               "vehpub.csv") |>
+  read_csv(show_col_types = FALSE)
 ```
+
+## Filter sample
 
 ### Filter for selected population
 
-Any number of variables might define your population of interest. Many of these are include in the trips file, but you might find (or construct) additional values from other files (for example, to identify people in households that own electric vehicles, you'd need to join data from the vehicles file).
-
-I am going to focus my analysis on people who are 65 years old or older.
+I am going to focus my analysis on households with children of any age.
 
 ```{r}
 
-sr_visit_trips <- visit_trips |>
-  filter(R_AGE > 64)
-
+family_trips <- trips |>
+  mutate(CHILDREN = HHSIZE - NUMADLT) |>
+  filter(CHILDREN > 0, R_AGE >= 18)
 ```
 
 ### Filter for trip distance
@@ -79,10 +73,10 @@ I want to identify trip that could conceivably be considered to be withing walki
 
 ```{r}
 
-short_sr_visit_trips <- sr_visit_trips |>
+short_family_trips <- family_trips |>
   filter(TRPMILAD < 1.5)
 
-nrow(short_sr_visit_trips)
+nrow(short_family_trips)
 ```
 
 This leaves me with a sample of 5,206 trips.
@@ -93,7 +87,7 @@ I want to predict the likelihood that a given trip will take place by walking (T
 
 ```{r}
 
-short_sr_visit_trips <- short_sr_visit_trips |>
+short_family_trips <- short_family_trips |>
   mutate(walk = TRPTRANS == "01")
 ```
 
@@ -101,7 +95,7 @@ And I can do a quick check to see what share of the trips in my sample are walk 
 
 ```{r, message=FALSE}
 
-short_sr_visit_trips |>
+short_family_trips |>
   mutate(Mode = factor(ifelse(walk, "Walk", "Other mode"),
                        levels = c("Walk", "Other mode"))) |>
   group_by(Mode) |>
@@ -115,7 +109,7 @@ I can also incorporate survey weights to estimate what share of the full populat
 
 ```{r, message=FALSE}
 
-short_sr_visit_trips |>
+short_family_trips |>
   as_survey_design(weights = WTTRDFIN) |>
   mutate(Mode = factor(ifelse(walk, "Walk", "Other mode"),
                        levels = c("Walk", "Other mode"))) |>
@@ -142,19 +136,17 @@ I'm going to predict the likelihood of a trip taking place by walking based on t
 
 -   Distance (TRPMILES)
 
--   Age (R_AGE)
+-   Number of children (CHILDREN)
 
--   Disability status (MEDCOND)
-
--   Population density in the census block group of the trip destination (DBPPOPDN)
+-   Urban area classification (URBAN)
 
 -   Gender (R_SEX)
 
 -   Household income (HHFAMINC)
 
--   Vehicle availability (whether HHVEHCNT is greater than zero)
+-   Number of workers (WORKER)
 
-Most of these are already available in the dataset, and I just need to filter out the missing values. I will need to construct a value for income and vehicle availability.
+Most of these are already available in the dataset, and I just need to filter out the missing values. I will need to construct a value for income.
 
 ### Distance
 
@@ -162,24 +154,10 @@ Let's look at the distribution of trip distances.
 
 ```{r}
 
-ggplot(short_sr_visit_trips) +
-  geom_histogram(aes(x = TRPMILES),
-                 color = "gray",
-                 fill = "cornsilk",
-                 bins = 40) +
-  scale_x_continuous(name = "Trip distance (miles)") +
-  scale_y_continuous(name = "Number of trips in sample") +
-  theme_minimal()
-```
-
-Missing values for distance are coded as -9, so I'll filter out negative numbers
-
-```{r}
-
-sample_trips <- short_sr_visit_trips |>
+sample_trips <- short_family_trips |>
   filter(TRPMILES >=0)
 
-ggplot(sample_trips) +
+trip_distance <- ggplot(sample_trips) +
   geom_histogram(aes(x = TRPMILES),
                  color = "gray",
                  fill = "cornsilk",
@@ -188,75 +166,54 @@ ggplot(sample_trips) +
                      breaks = seq(0, 1.5, by=0.1)) +
   scale_y_continuous(name = "Number of trips in sample") +
   theme_minimal()
+
+ggsave("trip distance.png",
+       plot = trip_distance,
+       width = 7,
+       height = 5,
+       dpi = 300)
 ```
 
-### Age
-
-Let's look at the distribution of ages within our sample. Note that the age of everyone older than 88 is recorded as being 92. Something to be aware of.
+### Number of children
 
 ```{r}
 
-ggplot(sample_trips) +
-  geom_histogram(aes(x = R_AGE),
-                 color = "gray",
-                 fill = "cornsilk",
+number_of_children <- ggplot(sample_trips) +
+  geom_histogram(aes(x = CHILDREN),
+                 color = "lightblue4",
+                 fill = "lightblue",
                  binwidth = 1) +
-  scale_x_continuous(name = "Traveler's age (years)",
-                     breaks = seq(0, 1.5, by=0.1)) +
+  scale_x_continuous(name = "Number of Children",
+                     breaks = 0:8) +
   scale_y_continuous(name = "Number of trips in sample") +
   theme_minimal()
+
+ggsave("number of children.png",
+       plot = number_of_children,
+       width = 7,
+       height = 5,
+       dpi = 300)
 ```
 
-### Disability
-
-This is the answer to the question "Does this person have a condition or disability that makes it difficult to travel outside the home?" where a value of "01" means yes. We'll set this up as a logical (binary) variable.
-
-This variable is only in the person file, so we'll need to join that data to the trips file.
+### Level of urbanization
 
 ```{r, message=FALSE}
 
-disability_data <- people |>
-  select(HOUSEID, PERSONID, MEDCOND)
-
-sample_trips <- sample_trips |>
-  left_join(disability_data) |>
-  mutate(disability = MEDCOND == "01")
-
-sample_trips |>
-  group_by(disability) |>
-  summarise(`Number of trips` = n()) |>
-  mutate(`Percent of trips` = 
-           paste0(round(100*`Number of trips`/sum(`Number of trips`)), "%")) |>
-  kable()
-```
-
-About twelve percent of trips in our sample are by people with a disability that impacts their mobility.
-
-### Density
-
-Densities are coded as categories, with a -9 to indicate missing values, so we'll filter those out.
-
-Let's look at the distribution of population densities at the trip destinations.
-
-```{r}
-sample_trips <- sample_trips |>
-  filter(DBPPOPDN > 0)
-
-density_values <- c(50, 300, 750, 1500, 3000, 7000, 17000, 30000)
-
 ggplot(sample_trips) +
-  geom_histogram(aes(x = DBPPOPDN),
-                 color = "gray",
-                 fill = "cornsilk",
-                 bins = 30) +
-  scale_x_continuous(breaks = density_values,
-                 labels = density_values,
-                 transform = "log",
-                 name = paste0("Population density of destination\n",
-                               "block group (people per sq-mi)")) +
+  geom_bar(aes(x = factor(URBAN)),
+           color = "gray",
+           fill = "cornsilk") +
+  scale_x_discrete(name = "Urban Classification",
+                   labels = c("01" = "Urban area",
+                              "02" = "Urban cluster",
+                              "03" = "Surrounded by urban areas",
+                              "04" = "Not in urban area")) +
   scale_y_continuous(name = "Number of trips in sample") +
   theme_minimal()
+
 ```
+
+A majority of short walking trips were made in an urban area.
 
 ### Gender
 
@@ -269,7 +226,7 @@ sample_trips |>
   summarise(`Number of trips` = n())
 ```
 
-Once again, negative values represent missing data. There was one trip by a person who declined to answer the question about their gender. We'll remove this trip from the data set and recode the variable as a true/false indicator for whether the trip is by a woman.
+Once again, negative values represent missing data. We'll recode the variable as a true/false indicator for whether the trip is by a woman.
 
 ```{r}
 
@@ -282,7 +239,7 @@ sample_trips <- sample_trips |>
 
 The HHFAMINC variable reports income in categories. We can recode these as a continuous variable. One approach is to use the midpoint of each category. There is no midpoint for the highest income category (greater than \$200,000), so you'd need to choose an arbitrary value for that top category.
 
-You could also use census microdata to find the median household income for seniors in each of those income categories, including the top category. You can use the `get_pums` function in the `tidycensus` package to get microdata.
+You could also use census microdata to find the median household income for families in each of those income categories, including the top category. You can use the `get_pums` function in the `tidycensus` package to get microdata.
 
 ```{r, message=FALSE, results='hide'}
 
@@ -294,10 +251,9 @@ all_pums <- get_pums(variables = c("FINCP", "AGEP"),
                      year = 2018,
                      recode = TRUE)
 
-
 ```
 
-And now we can filter to only individuals older than 65 and find the median income within each income category.
+And now we can filter to only individuals with children and find the median income within each income category.
 
 ```{r}
 
@@ -332,11 +288,11 @@ sample_trips <- sample_trips |>
   filter(HHFAMINC > 0) |>
   mutate(income = pums_summary$`Median income`[HHFAMINC])
 
-ggplot(sample_trips) +
+household_income <- ggplot(sample_trips) +
   geom_histogram(aes(x = income),
                  bins = 20,
-                 color = "gray",
-                 fill = "cornsilk") +
+                 color = "lightblue4",
+                 fill = "lightblue") +
   scale_x_continuous(transform = "log",
                      breaks = breaks <- 5000*2^seq(0, 6, by=1),
                      labels = paste0("$", formatC(breaks, 
@@ -345,16 +301,21 @@ ggplot(sample_trips) +
                      name = "Annual household income") +
   scale_y_continuous(name = "Number of trips in sample") +
   theme_minimal()
+
+ggsave("household income.png",
+       plot = household_income,
+       width = 7,
+       height = 5,
+       dpi = 300)
 ```
 
-### Vehicle availability
-
-And I'll finally add a binary variable for whether the trip is made by a person in zero-vehicle household.
+### Number of workers
 
 ```{r}
 
 sample_trips <- sample_trips |>
-  mutate(zero_veh = HHVEHCNT ==0)
+  mutate(workers = WRKCOUNT)
+
 ```
 
 ### Final sample size
@@ -377,23 +338,23 @@ $$
 
 model <- glm(walk ~ 
                TRPMILES +
-               R_AGE +
-               disability +
-               DBPPOPDN +
+               CHILDREN +
+               URBAN +
                female +
                income +
-               zero_veh,
+               workers,
              data = sample_trips,
              family = "binomial")
 
-coeff_labels <- c("Trip distance (miles)" = "TRPMILES",
-                  "Age (years)" = "R_AGE",
-                  "Disability affecting travel" = "disabilityTRUE",
-                  "Block-group population density at destination" =
-                    "DBPPOPDN",
+coeff_labels <- c("Intercept" = "(Intercept)",
+                  "Trip distance (miles)" = "TRPMILES",
+                  "Number of children" = "CHILDREN",
+                  "Level of urbanization (Urban Cluster)" = "URBAN02",
+                  "Level of urbanization (Urban Surrounded Area)" = "URBAN03",
+                  "Level of urbanization (Not Urban)" = "URBAN04",
                   "Female" = "femaleTRUE",
                   "Annual household income" = "income",
-                  "Zero-vehicle household" = "zero_vehTRUE")
+                  "Number of workers" = "workers")
 
 export_summs(model, 
              robust = "HC3", 
@@ -420,13 +381,15 @@ It looks like the model supports the following conclusions:
 
 -   People are less likely to walk for longer trips
 
--   People with mobility-related disabilities are less likely to walk
+-   People with more children in their household are less likely to walk
 
--   People in walking to/in higher density areas are more likely to walk
+-   People in less urbanized areas are less likely to walk
 
--   Higher-income people are more likely to walk
+-   Women are less likely to walk
 
--   People in zero-vehicle households are more likely to walk
+-   Higher income people are more likely to walk
+
+-   People who are workers are less likely to walk
 
 Interpreting these coefficients directly (beyond just their direction and significance) is not terribly intuitive, but we can visualize some predicted probabilities.
 
@@ -434,25 +397,36 @@ Here is a plot of the predicted probabilities of walking across the range of tri
 
 ```{r}
 
-effect_plot(model, pred = "TRPMILES", interval = TRUE) +
+predicted_plots <- effect_plot(model, pred = "TRPMILES", interval = TRUE) +
   scale_x_continuous(name = "Trip distance (miles)",
                      breaks = seq(0, 1.5, by  =0.1)) +
   scale_y_continuous(name = "Probabilitity of walking",
                      breaks = breaks <- seq(0, 0.8, by = 0.1),
                      labels = paste0(breaks*100, "%"))
+
+ggsave("predicted_walk_prob_by_distance.png",
+       plot = predicted_plots,
+       width = 7,
+       height = 5,
+       dpi = 300)
 ```
 
 The `effect_plot` function also works for categorical predictors.
 
 ```{r}
+unique(sample_trips$URBAN)
 
-effect_plot(model = model, pred = "disability", interval = TRUE) +
+
+effect_plot(model = model, 
+            pred = "URBAN", 
+            interval = TRUE) +
   scale_y_continuous(name = "Probability of walking for a particular trip",
-                     breaks = breaks <- seq(0.11, 0.23, by=0.01),
-                     labels = paste0(breaks*100, "%")) +
-  scale_x_discrete(name = paste0("Does this person have a disability or\n",
-                                 "medical condition that makes it difficult\n",
-                                 "to travel outside the home?"),
-                   labels = c("No", "Yes"))
+                     breaks = seq(0, 1, by = 1),
+                     labels = paste0(seq(0, 1, by = 1) * 100, "%")) +
+  scale_x_discrete(name = "Level of urbanization",
+                   labels = c("Urban Area", 
+                              "Urban Cluster", 
+                              "Surrounded by Urban Area",
+                              "Not Urban"))
   
 ```
